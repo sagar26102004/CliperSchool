@@ -1,4 +1,5 @@
 {
   "$schema": "https://openapi.vercel.sh/vercel.json",
-  "framework": "express"
+  "framework": "express",
+  "regions": ["bom1"]
 }

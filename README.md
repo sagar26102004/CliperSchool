@@ -88,6 +88,12 @@ Upstash (Redis) → connect to this project**. That injects `UPSTASH_REDIS_REST_
 `UPSTASH_REDIS_REST_TOKEN` (or the `KV_REST_API_*` pair — both are accepted), and the composition
 root switches to the Redis repositories on its own. A free tier is enough.
 
+Two settings on that store are worth getting right. Keep **eviction off**: under memory pressure it
+would silently drop keys, and here a dropped key is a learner's attempt. And put the store in the
+**same region as the functions** — `vercel.json` pins those to `bom1`, so a store in `bom1` keeps
+the several sequential round trips each request makes on the same continent. Change both together
+or neither.
+
 Skipping this does not break the build. It breaks the product, quietly: the in-memory repositories
 are correct for one long-lived process, but a serverless host may route the POST that saves a
 submission and the GET that renders its feedback to different instances, so a learner's attempt
