@@ -1,0 +1,7 @@
+Static assets go here.
+
+Vercel ignores express.static() — anything served directly must live in this
+directory, which the CDN serves ahead of the function. The directory is also
+what a non-Express framework preset would look for as build output, so keeping
+it present means a misdetected preset degrades to an empty static site rather
+than failing the build outright.
