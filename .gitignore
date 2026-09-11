@@ -4,3 +4,5 @@ data/*.db
 data/*.db-journal
 *.log
 .env
+.env.local
+.vercel

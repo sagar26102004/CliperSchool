@@ -17,7 +17,7 @@ Requires **Node 22.5+** (developed on Node 24).
 
 ```bash
 npm install
-npm test        # 67 tests, all offline
+npm test        # 98 tests, all offline
 npm run dev     # http://localhost:3000
 ```
 
@@ -35,6 +35,27 @@ ANTHROPIC_API_KEY=sk-ant-... npm run dev     # optionally ANTHROPIC_MODEL=claude
 No code change. `buildContainer` picks `AnthropicClient` over `StubLlmClient` when the key is present;
 nothing in the evaluation layer knows which one it has.
 
+### Using a free model instead
+
+Anthropic has no free tier. Any provider speaking the OpenAI chat-completions shape works through
+`OpenAiCompatibleClient`, which is selected only when `ANTHROPIC_API_KEY` is absent — so setting
+both is unambiguous rather than a coin toss.
+
+```bash
+GEMINI_API_KEY=... npm run dev                        # Google AI Studio, free, no card
+LLM_API_KEY=... LLM_BASE_URL=https://api.groq.com/openai/v1 LLM_MODEL=llama-3.3-70b-versatile npm run dev
+```
+
+One adapter covers Gemini, Groq, Mistral, Cerebras, SambaNova and OpenRouter, because base URL and
+model are constructor arguments. `GEMINI_API_KEY` alone is enough — it defaults the base URL and
+pins `gemini-3.6-flash`, avoiding `gemini-2.5-flash`, which the models endpoint still advertises but
+which 404s for keys issued after its retirement.
+
+Worth knowing if you use one: a reasoning model's latency is dominated by thinking and varies a lot
+(10-34s observed for this prompt), which is why the job timeout is 90s rather than something tidier.
+Free tiers also generally train on what you send — fine for synthetic designs, not for real learner
+work.
+
 ### Demonstrating the failure paths
 
 The reliability behaviour is switchable, so you can watch it rather than take my word for it:
@@ -45,6 +66,58 @@ LLM_FAILURE_MODE=malformed npm run dev                 # bad JSON → repair ret
 LLM_FAILURE_MODE=slow npm run dev                      # watch Submitted → Evaluating → Completed
 LLM_FAILURE_MODE=throw LLM_REQUIRED=true npm run dev   # hard Failed state + working Retry button
 ```
+
+## Deploy it (Vercel)
+
+The repository is deployable as-is. `src/index.ts` exports the Express app rather than calling
+`listen()`, which is exactly the entrypoint Vercel's zero-configuration Express support looks for,
+and `vercel.json` pins that preset so the whole app becomes a single Vercel Function. There is no
+build command and no output directory to configure.
+
+```bash
+npx vercel            # first run links or creates the project, deploys a preview
+npx vercel --prod
+```
+
+Or import the repository at [vercel.com/new](https://vercel.com/new) and it will deploy on push.
+
+### What you have to provide
+
+**A Redis store — required in practice.** In the Vercel dashboard: **Storage → Marketplace →
+Upstash (Redis) → connect to this project**. That injects `UPSTASH_REDIS_REST_URL` and
+`UPSTASH_REDIS_REST_TOKEN` (or the `KV_REST_API_*` pair — both are accepted), and the composition
+root switches to the Redis repositories on its own. A free tier is enough.
+
+Skipping this does not break the build. It breaks the product, quietly: the in-memory repositories
+are correct for one long-lived process, but a serverless host may route the POST that saves a
+submission and the GET that renders its feedback to different instances, so a learner's attempt
+vanishes between the two. The function log warns loudly when it comes up in that state.
+
+**An Anthropic API key — optional.** Set `ANTHROPIC_API_KEY` (and optionally `ANTHROPIC_MODEL`) in
+**Settings → Environment Variables** to evaluate with real Claude. Without it the deployment runs
+the deterministic stub, which is a complete, demonstrable experience — just not an AI-judged one.
+
+Everything else is already handled. Nothing else is required from you.
+
+### What changes on a serverless host
+
+Three substitutions in `container.ts`, all selected from the environment, none of which any domain
+type, service or route can observe:
+
+| Concern | Long-lived process | Vercel |
+| --- | --- | --- |
+| Storage | in-memory repositories | `RedisAttemptRepository` & co. over the Upstash REST client |
+| Background work | `InProcessJobQueue` | `ServerlessJobQueue`, handing each job to `waitUntil` |
+| Stalled evaluations | cannot really happen | `recoverIfStalled`, re-queued from the read path |
+
+The last one is the interesting one. A platform that can stop a function the moment its time budget
+expires can leave an evaluation permanently `Running` with nothing alive to finish it, so the
+attempt page and the status endpoint check for that and re-queue it — a waiting learner triggers
+their own recovery, with no scheduler to operate. `tests/integration/serverless.test.ts` exercises
+all three against an in-process Redis fake.
+
+Local development is unaffected: with no Redis credentials and no `VERCEL` in the environment,
+`npm run dev` behaves exactly as before.
 
 ## A five-minute tour
 
@@ -93,11 +166,13 @@ src/
     feedback/     FeedbackReport (derived, never stored)
   evaluation/     Evaluator interface · Deterministic · Llm · Composite · MergePolicy · rules/ · prompts/
   application/    AttemptService · EvaluationOrchestrator · JobQueue · ProgressService
-  infra/          repositories · LlmClient (Anthropic | Stub) · clock/ids (injected)
+  infra/          repositories (in-memory | Redis) · LlmClient (Anthropic | OpenAI-compatible | Stub) · clock/ids
   web/            Express routes + server-rendered views
   seed/           4 problems + the rubric, as data
   container.ts    the composition root — every implementation choice lives here
-tests/            67 unit + integration tests
+  main.ts         local entry — builds the container and listens on a port
+  index.ts        serverless entry — builds the container and exports the app
+tests/            98 unit + integration tests
 ```
 
 ## Tests
@@ -106,7 +181,7 @@ tests/            67 unit + integration tests
 npm test
 ```
 
-67 tests. Beyond the happy path they cover the failure and edge cases specifically:
+98 tests. Beyond the happy path they cover the failure and edge cases specifically:
 
 - illegal `Attempt` transitions (double submit, complete-before-submit, reopen a completed attempt)
 - duplicate submit → same evaluation, queue not re-entered; order-independent content hashing

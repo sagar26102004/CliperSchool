@@ -5,7 +5,7 @@
   "type": "module",
   "description": "A focused practice platform for Low-Level Design: choose a problem, submit a structured design, get rubric-anchored explainable feedback, and track recurring weaknesses across attempts.",
   "engines": {
-    "node": ">=22.5.0"
+    "node": ">=20.11.0"
   },
   "scripts": {
     "dev": "tsx watch src/main.ts",
@@ -16,6 +16,8 @@
     "test:watch": "vitest"
   },
   "dependencies": {
+    "@upstash/redis": "^1.38.4",
+    "@vercel/functions": "^3.9.7",
     "express": "^5.1.0",
     "zod": "^3.25.76"
   },

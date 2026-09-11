@@ -114,6 +114,49 @@ export class EvaluationOrchestrator {
   }
 
   /**
+   * Re-queues an evaluation that has been `Running` implausibly long.
+   *
+   * In a single long-lived process this would be near-impossible. On a
+   * serverless host it is routine: the platform can stop a function the moment
+   * its time budget expires, leaving an evaluation permanently `Running` with
+   * nothing left alive to finish it. Without this, the learner watches a
+   * spinner forever — the exact outcome the whole failure design exists to
+   * prevent.
+   *
+   * Called from the read paths (the status poll and the attempt page), so
+   * recovery happens naturally while a learner is waiting rather than needing a
+   * scheduler. Safe to call repeatedly: `runEvaluation` returns immediately if
+   * the evaluation has since completed.
+   *
+   * Returns true when a recovery was triggered.
+   */
+  async recoverIfStalled(evaluationId: EvaluationId, staleAfterMs = STALE_AFTER_MS): Promise<boolean> {
+    const evaluation = await this.deps.evaluations.findById(evaluationId);
+    if (!evaluation || evaluation.status !== 'Running') return false;
+
+    const startedAt = evaluation.startedAt;
+    if (!startedAt) return false;
+    if (this.deps.clock.now().getTime() - startedAt.getTime() < staleAfterMs) return false;
+
+    // Give up rather than loop forever if repeated runs keep being cut off.
+    if (evaluation.attemptsMade >= 3) {
+      await this.markFailed(
+        evaluationId,
+        new Error(
+          'Evaluation was interrupted repeatedly before it could finish. Your submission is safe — try again.',
+        ),
+      );
+      return false;
+    }
+
+    this.deps.queue.enqueue({
+      id: `evaluate:${evaluation.id}:recover`,
+      run: (signal) => this.runEvaluation(evaluation.id, signal),
+    });
+    return true;
+  }
+
+  /**
    * The unit of work the queue executes.
    *
    * Throwing from here is meaningful: it tells the queue to retry. Only after
@@ -207,6 +250,18 @@ function composeFallbackSummary(resultCount: number): string {
 }
 
 /** Recovers the evaluation id from the queue job id the orchestrator created. */
+/**
+ * How long `Running` must persist before an evaluation is presumed abandoned.
+ *
+ * This has to exceed the longest a job can legitimately still be working, or
+ * recovery races the very job it is trying to rescue and pays for the same
+ * evaluation twice. The serverless queue allows two attempts at the 90s job
+ * timeout, so anything under 180s would re-queue live work; 240s leaves margin
+ * without making a genuinely frozen evaluation feel abandoned — and the learner
+ * is looking at an honest "Evaluating" state the whole time, not a blank page.
+ */
+const STALE_AFTER_MS = 240_000;
+
 export function evaluationIdFromJobId(jobId: string): EvaluationId | null {
   const parts = jobId.split(':');
   return parts[0] === 'evaluate' && parts[1] ? (parts[1] as EvaluationId) : null;

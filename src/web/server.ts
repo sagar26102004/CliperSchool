@@ -150,6 +150,14 @@ export function createServer(app: Container) {
       if (!problem) throw new NotFoundError('Problem', attempt.problemId);
 
       const evaluation = await app.attemptService.getEvaluation(attemptId);
+
+      // A serverless function can be stopped mid-evaluation, leaving a Running
+      // row with nothing alive to finish it. Checking on the read path means a
+      // waiting learner triggers their own recovery.
+      if (evaluation && evaluation.status === 'Running') {
+        await app.orchestrator.recoverIfStalled(evaluation.id);
+      }
+
       const rubric = evaluation
         ? await app.rubrics.findByVersionTag(evaluation.rubricVersionTag)
         : await app.rubrics.findById(problem.rubricId);
@@ -177,6 +185,10 @@ export function createServer(app: Container) {
       const attemptId = asAttemptId(String(req.params.id));
       const attempt = await app.attemptService.getAttempt(attemptId);
       const evaluation = await app.attemptService.getEvaluation(attemptId);
+
+      if (evaluation && evaluation.status === 'Running') {
+        await app.orchestrator.recoverIfStalled(evaluation.id);
+      }
 
       res.json({
         attemptId: attempt.id,
